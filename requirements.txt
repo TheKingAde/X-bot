@@ -1,3 +1,11 @@
 tweepy==4.16.0
 python-dotenv==1.1.1
 python-telegram-bot==22.3
+pydub==0.25.1
+SpeechRecognition==3.14.3
+
+# System dependency: You must install ffmpeg manually
+# Windows: https://ffmpeg.org/download.html
+# Ubuntu: sudo apt install ffmpeg
+# MacOS: brew install ffmpeg
+# Note: Ensure ffmpeg is in your PATH for pydub to work correctly
