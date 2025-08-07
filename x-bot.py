@@ -86,12 +86,25 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             transcript = recognizer.recognize_google(audio)
             await update.message.reply_text(f"🗣 Transcription: {transcript}")
             user_id = update.effective_user.id
-            response = send_ai_request(user_id, transcript)
-            if not response:
-                await update.message.reply_text("❌ AI didn't return a response.")
-                return
 
-            # Step 3: Convert response to speech (TTS)
+            # 🔍 Detect intent
+            intent = detect_intent(transcript)
+            logger.info(f"[Voice] Detected intent: {intent}")
+
+            # 🐦 Post to Twitter if intent is make_post
+            if intent == "make_post":
+                try:
+                    response = send_ai_request(user_id, transcript, system_prompt=STYLE_SYSTEM_PROMPT)
+                    if response:
+                        client.create_tweet(text=response)
+                        await update.message.reply_text("\u2705 Tweet posted:\n" + response + "\nIntent: " + intent)
+                    else:
+                        await update.message.reply_text("❌ AI didn't return a response. Please try again.")
+                except Exception as e:
+                    logger.error(f"Twitter post error: {str(e)}")
+                    await update.message.reply_text(f"❌ Couldn't post: {e}")
+
+            # 🎤 Convert response to TTS
             tts = gTTS(text=response, lang='en', tld='ca')
             audio_path = f"response_{update.message.message_id}.mp3"
             tts.save(audio_path)
@@ -119,17 +132,50 @@ ai_chats = [
     {"provider": OIVSCodeSer2, "model": "gpt-4o-mini", "label": "OIVSCodeSer2 - gpt-4o-mini"},
     {"provider": WeWordle, "model": "gpt-4", "label": "WeWordle - GPT-4"},
 ]
-
+client.search_recent_tweets(sort_)
 failed_ai_chats = set()
 ai_chat_to_use = 0
-def send_ai_request(user_id, user_message):
+# At the top of your file, add the user style prompt
+STYLE_SYSTEM_PROMPT = """
+You are an X (Twitter) assistant. Mimic the writing style of the user. Here are their past posts:
+
+- Using tweepy
+- Hello world from the X API v2 🐦✨
+- “It only gets easier” not when you’re trying to debug
+- I also built a bot that automates interactions with the Freelancer API...
+- One of the things I’ve been building as a personal project. Used g4f 😌
+- I am learning how to automate posting on X using OpenAI's chat model and n8n!
+- 100 days of automation?
+- I think I need to build and display more stuff just to show you guys the beauty of automation
+- Back to building\nNow working on a crypto trading bot
+- The satisfaction that comes with a project working as it should after days of building and debugging is second to non
+- Testing live revealed bugs which has lead to improvements.
+- I want to build a chatbot
+- Automate your way to trading success or just earn passive income without paying attention to the details
+- B3 Scalper working well so far after
+- Allowing B3 Scalper to hold positions over the weekend doesn't seem like a good idea.
+- Don't dare to think a bug is from a library's code not yours
+- Posting what I’ve done so far shortly.
+
+FOLLOW THE USER'S STYLE RULES:
+When the user wants to post something new, generate it in the same tone, length, and style.
+Don't use exclaimation marks or emojis, and keep the language casual and straightforward.
+Don't use any hashtags or links, numberings just the text content.
+Total number of characters should be less than 150.
+"""
+
+# Modify send_ai_request to accept optional system prompt
+def send_ai_request(user_id, user_message, system_prompt=None):
     global ai_chat_to_use, failed_ai_chats
 
     if user_id not in user_histories:
         user_histories[user_id] = []
 
-    # Build full chat history
-    history = user_histories[user_id] + [{"role": "user", "content": user_message}]
+    history = []
+    if system_prompt:
+        history.append({"role": "system", "content": system_prompt})
+
+    history += user_histories[user_id] + [{"role": "user", "content": user_message}]
     total_chats = len(ai_chats)
     attempts = 0
 
@@ -150,17 +196,20 @@ def send_ai_request(user_id, user_message):
                 kwargs["model"] = current_chat["model"]
 
             response = g4f.ChatCompletion.create(**kwargs)
-
-            if response and isinstance(response, str) and response.strip():
-                # Update history
+                
+            if (
+                response
+                and isinstance(response, str)
+                and response.strip()
+                and len(response.strip()) < 150
+                and not re.search(r"[!#]|https?://|\bwww\.", response)
+                and not re.search(r"[\U0001F600-\U0001F64F"
+                                r"\U0001F300-\U0001F5FF"
+                                r"\U0001F680-\U0001F6FF"
+                                r"\U0001F1E0-\U0001F1FF]", response)
+            ):
                 user_histories[user_id] = history + [{"role": "assistant", "content": response}]
                 user_histories[user_id] = user_histories[user_id][-MAX_HISTORY_LENGTH:]
-                # if (
-            #     response
-            #     and isinstance(response, str)
-            #     and response.strip()
-            #     and re.match(r"^[\s]*[a-zA-Z]", response)
-            # ):
                 return response
 
         except Exception:
@@ -172,16 +221,29 @@ def send_ai_request(user_id, user_message):
     failed_ai_chats.clear()
     return False
 
-# /chat command
+# Update /chat command
 async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = " ".join(context.args)
     if not user_message:
-        await update.message.reply_text("⚠️ Usage: /chat your question or prompt")
+        await update.message.reply_text("\u26a0\ufe0f Usage: /chat your question or prompt")
         return
 
     try:
         user_id = update.effective_user.id
-        response = send_ai_request(user_id, user_message)
+        intent = detect_intent(user_message)
+        logger.info(f"[User {user_id}] Detected intent: {intent}")
+
+        if intent == "make_post":
+            response = send_ai_request(user_id, user_message, system_prompt=STYLE_SYSTEM_PROMPT)
+            if response:
+                client.create_tweet(text=response)
+                await update.message.reply_text("\u2705 Tweet posted:\n" + response + "\nIntent: " + intent)
+            else:
+                await update.message.reply_text("❌ AI didn't return a response. Please try again.")
+            return
+
+        elif intent == "general":
+            response = send_ai_request(user_id, user_message)
 
         if response:
             await update.message.reply_text(response)
@@ -189,7 +251,97 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ AI didn't return a response. Please try again.")
     except Exception as e:
         logger.error(f"Chat command error: {str(e)}")
-        await update.message.reply_text("⚠️ Error communicating with AI. Please try again.")
+        await update.message.reply_text("\u26a0\ufe0f Error communicating with AI. Please try again.")
+
+
+
+INTENT_SYSTEM_PROMPT = """You are an intent classifier. Given a user message, return one of the following intents only:
+
+- make_post
+- schedule_task
+- general
+
+Return only the intent, and nothing else.
+
+Examples:
+User: I want to post something
+Intent: make_post
+
+User: I want to post about
+Intent: make_post
+
+User: I want to make a post about
+Intent: make_post
+
+User: make a post about
+Intent: make_post
+
+User: Write a tweet for me
+Intent: make_post
+
+User: Help me post this
+Intent: make_post
+
+User: Share how I did something on X
+Intent: make_post
+
+User: I want to share how i did something on X
+Intent: make_post
+
+User: Tweet this
+Intent: make_post
+
+User: Make a tweet using this idea
+Intent: make_post
+
+
+User: What's the weather today?
+Intent: general
+
+User: Who won the match?
+Intent: general
+
+User: How are you?
+Intent: general
+"""
+
+
+def detect_intent(user_message: str) -> str:
+    messages = [
+        {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
+    total_chats = len(ai_chats)
+    attempts = 0
+    global ai_chat_to_use, failed_ai_chats
+
+    while attempts < total_chats:
+        if ai_chat_to_use in failed_ai_chats:
+            ai_chat_to_use = (ai_chat_to_use + 1) % total_chats
+            attempts += 1
+            continue
+
+        try:
+            kwargs = {
+                "provider": ai_chats[ai_chat_to_use]["provider"],
+                "messages": messages,
+            }
+            if ai_chats[ai_chat_to_use]["model"]:
+                kwargs["model"] = ai_chats[ai_chat_to_use]["model"]
+
+            result = g4f.ChatCompletion.create(**kwargs)
+            if result:
+                intent = result.strip().lower()
+                if intent in ["make_post", "schedule_task", "general"]:
+                    return intent
+        except Exception:
+            failed_ai_chats.add(ai_chat_to_use)
+
+        ai_chat_to_use = (ai_chat_to_use + 1) % total_chats
+        attempts += 1
+
+    return "general"  # fallback
+
 
 # App setup
 if __name__ == "__main__":
@@ -197,5 +349,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("echo", echo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.add_handler(CommandHandler("chat", chat_command))
+    app.add_handler(MessageHandler(filters.TEXT, chat_command))
     app.run_polling()
